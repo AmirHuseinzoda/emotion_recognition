@@ -1,0 +1,40 @@
+# Данные и веса — слишком большие для GitHub
+data/
+checkpoints/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Окружения
+.env
+.venv
+env/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+
+# Claude Code
+.claude/
+
+# Личные документы диплома
+отчет/
+Бланк задания_090301.docx
+Задача.txt
+
+# OS
+.DS_Store
+Thumbs.db
