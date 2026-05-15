@@ -43,7 +43,9 @@ LABEL_TO_IDX = {name: idx for _, (name, idx) in EMOTION_MAP.items()}
 IDX_TO_LABEL = {idx: name for name, idx in LABEL_TO_IDX.items()}
 
 # 6-классовый маппинг (после объединения calm→neutral, удаления surprised/neutral_ravdess)
+# Это основной маппинг — используйте его везде при num_classes=6
 IDX_TO_LABEL_6 = {0: 'neutral', 1: 'happy', 2: 'sad', 3: 'angry', 4: 'fearful', 5: 'disgust'}
+CLASS_NAMES = [IDX_TO_LABEL_6[i] for i in range(6)]  # ['neutral','happy','sad','angry','fearful','disgust']
 
 
 def parse_ravdess_filename(filepath: str) -> Optional[dict]:
@@ -95,42 +97,64 @@ def build_ravdess_index(root_dir: str, modality: str = 'video') -> pd.DataFrame:
 
 
 CREMAD_EMOTION_MAP = {
-    'ANG': ('angry',   4),
-    'DIS': ('disgust', 6),
-    'FEA': ('fearful', 5),
-    'HAP': ('happy',   2),
+    'ANG': ('angry',   3),
+    'DIS': ('disgust', 5),
+    'FEA': ('fearful', 4),
+    'HAP': ('happy',   1),
     'NEU': ('neutral', 0),
-    'SAD': ('sad',     3),
+    'SAD': ('sad',     2),
 }
 
 
-def build_cremad_index(root_dir: str) -> pd.DataFrame:
+def build_cremad_index(root_dir: str, audio_dir: str = None) -> pd.DataFrame:
     """
     Сканирует директорию CREMA-D и строит DataFrame.
-    Формат файла: {actorID}_{sentence}_{emotion}_{intensity}.flv
-    Все актёры идут в train (actor=-1 означает CREMA-D актёра).
+    Формат файла: {actorID}_{sentence}_{emotion}_{intensity}.flv/.wav
+
+    Args:
+        root_dir:  директория с .flv видеофайлами CREMA-D
+        audio_dir: директория с извлечёнными .wav файлами (опционально).
+                   Создаётся скриптом scripts/extract_cremad_audio.py.
     """
-    root = Path(root_dir)
     records = []
-    for filepath in sorted(root.rglob('*.flv')):
+
+    def _parse_file(filepath: Path, ext: str):
         parts = filepath.stem.split('_')
         if len(parts) < 3:
-            continue
+            return None
         emotion_code = parts[2].upper()
         if emotion_code not in CREMAD_EMOTION_MAP:
-            continue
+            return None
         emotion_name, emotion_idx = CREMAD_EMOTION_MAP[emotion_code]
-        records.append({
-            'path':   str(filepath),
+        try:
+            actor_id = int(parts[0])
+        except ValueError:
+            actor_id = -1
+        return {
+            'path':    str(filepath),
             'emotion': emotion_name,
             'label':   emotion_idx,
-            'actor':   -1,   # CREMA-D актёры всегда в train
-            'ext':     '.flv',
+            'actor':   actor_id,
+            'ext':     ext,
             'source':  'cremad',
-        })
+        }
 
-    df = pd.DataFrame(records)
-    return df
+    # Видео: .flv файлы
+    for filepath in sorted(Path(root_dir).rglob('*.flv')):
+        rec = _parse_file(filepath, '.flv')
+        if rec is not None:
+            records.append(rec)
+
+    # Аудио: извлечённые .wav файлы (если директория указана и существует)
+    if audio_dir:
+        audio_path = Path(audio_dir)
+        if audio_path.exists():
+            for filepath in sorted(audio_path.rglob('*.wav')):
+                rec = _parse_file(filepath, '.wav')
+                if rec is not None:
+                    records.append(rec)
+
+    return pd.DataFrame(records)
 
 
 # ──────────────────────────────────────────────
@@ -160,7 +184,10 @@ class RAVDESSAudioDataset(Dataset):
 
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
-        waveform, sr = sf.read(row['path'], dtype='float32', always_2d=False)
+        try:
+            waveform, sr = sf.read(row['path'], dtype='float32', always_2d=False)
+        except Exception:
+            return torch.zeros(self.max_len), int(row['label'])
 
         # Моно
         if waveform.ndim > 1:
@@ -189,13 +216,35 @@ class RAVDESSAudioDataset(Dataset):
         return waveform, int(row['label'])  # (T,), int
 
     def _augment(self, waveform: torch.Tensor) -> torch.Tensor:
-        # Случайный гауссовый шум
-        if torch.rand(1).item() < 0.3:
-            waveform = waveform + 0.005 * torch.randn_like(waveform)
-        # Случайный сдвиг по времени
-        if torch.rand(1).item() < 0.3:
-            shift = int(torch.randint(-1600, 1600, (1,)).item())
+        T = waveform.shape[-1]
+
+        # Volume jitter — имитирует разные расстояния до микрофона
+        if torch.rand(1).item() < 0.5:
+            gain = 0.5 + torch.rand(1).item()   # [0.5, 1.5]
+            waveform = waveform * gain
+
+        # Gaussian noise с переменной интенсивностью
+        if torch.rand(1).item() < 0.4:
+            sigma = 0.002 + torch.rand(1).item() * 0.012
+            waveform = waveform + sigma * torch.randn_like(waveform)
+
+        # Time shift ±0.3 сек
+        if torch.rand(1).item() < 0.4:
+            shift = int(torch.randint(-4800, 4800, (1,)).item())
             waveform = torch.roll(waveform, shift, dims=-1)
+
+        # SpecAugment: time masking (до 20% сигнала, 1-2 маски)
+        if torch.rand(1).item() < 0.5:
+            waveform = waveform.clone()
+            max_mask = max(1, int(T * 0.20))
+            for _ in range(torch.randint(1, 3, (1,)).item()):
+                mask_len = torch.randint(1, max_mask + 1, (1,)).item()
+                if T - mask_len > 0:
+                    start = torch.randint(0, T - mask_len, (1,)).item()
+                    waveform[start: start + mask_len] = 0.0
+
+        # Clamp чтобы не выйти за [-1, 1]
+        waveform = waveform.clamp(-1.0, 1.0)
         return waveform
 
 
@@ -270,23 +319,48 @@ class RAVDESSVideoDataset(Dataset):
         return tensor_frames, int(row['label'])
 
     def _augment(self, frames: torch.Tensor) -> torch.Tensor:
+        import torchvision.transforms.functional as TF
+        frames = frames.contiguous()  # flip/rotate возвращают view — нужна копия для in-place ops
+
         # Горизонтальный флип
         if torch.rand(1).item() < 0.5:
             frames = torch.flip(frames, dims=[-1])
 
-        # Яркость / контраст / насыщенность — одни параметры для всей последовательности
+        # Яркость / контраст — одни параметры для всей последовательности
         if torch.rand(1).item() < 0.5:
-            brightness = 1.0 + (torch.rand(1).item() - 0.5) * 0.4   # [0.8, 1.2]
+            brightness = 1.0 + (torch.rand(1).item() - 0.5) * 0.4
             contrast   = 1.0 + (torch.rand(1).item() - 0.5) * 0.4
             frames = torch.clamp(frames * brightness, -3, 3)
             mean = frames.mean(dim=[-2, -1], keepdim=True)
             frames = torch.clamp(mean + (frames - mean) * contrast, -3, 3)
 
-        # Небольшой поворот (±15°) — одинаковый для всех кадров
+        # Поворот ±15°
         if torch.rand(1).item() < 0.4:
-            import torchvision.transforms.functional as TF
             angle = (torch.rand(1).item() - 0.5) * 30.0
             frames = torch.stack([TF.rotate(f, angle) for f in frames])
+
+        # Grayscale — снижает зависимость от цвета кожи и освещения
+        if torch.rand(1).item() < 0.2:
+            gray = frames.mean(dim=1, keepdim=True).expand_as(frames)
+            frames = gray
+
+        # RandomErasing — заставляет модель не полагаться на один регион лица
+        if torch.rand(1).item() < 0.3:
+            frames = frames.clone()
+            T, C, H, W = frames.shape
+            erase_h = int(H * (0.1 + torch.rand(1).item() * 0.2))
+            erase_w = int(W * (0.1 + torch.rand(1).item() * 0.2))
+            top  = torch.randint(0, H - erase_h + 1, (1,)).item()
+            left = torch.randint(0, W - erase_w + 1, (1,)).item()
+            frames[:, :, top:top + erase_h, left:left + erase_w] = 0.0
+
+        # Temporal dropout — случайно обнуляет кадры, имитирует потери в realtime
+        if torch.rand(1).item() < 0.2:
+            frames = frames.clone()
+            T = frames.shape[0]
+            n_drop = max(1, int(T * 0.1))
+            drop_idx = torch.randperm(T)[:n_drop]
+            frames[drop_idx] = 0.0
 
         # Гауссовский шум
         if torch.rand(1).item() < 0.3:

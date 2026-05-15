@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from models.video.backbone import VideoEmotionModel
 from models.audio.transformer import AudioEmotionModel
 from models.fusion.fusion import FusionModel
-from datasets.ravdess import IDX_TO_LABEL
+from datasets.ravdess import IDX_TO_LABEL_6 as IDX_TO_LABEL
 
 import yaml
 
@@ -99,12 +99,17 @@ class EmotionInference:
             audio_model=self.audio_model,
             fusion_type=fusion_type,
             num_classes=self.num_classes,
+            video_embed_dim=tcn_cfg['num_channels'],
+            audio_embed_dim=cfg['audio']['hidden_size'],
+            hidden_dim=cfg['fusion']['hidden_dim'],
         )
         self.fusion_model.load_state_dict(torch.load(fusion_ckpt, map_location='cpu'))
         self.fusion_model.eval().to(DEVICE)
 
         # Детектор лиц
-        self.detector = MTCNN(keep_all=False, device=str(DEVICE)) if MTCNN_AVAILABLE else None
+        # image_size + margin воспроизводят выравнивание лица как в preprocess_video.py
+        self.detector = MTCNN(image_size=112, margin=20, keep_all=False,
+                              post_process=False, device=str(DEVICE)) if MTCNN_AVAILABLE else None
 
         # Буферы
         self.frame_buffer = deque(maxlen=self.window_frames)
@@ -148,8 +153,8 @@ class EmotionInference:
             face = self.detector(pil)
             if face is None:
                 return None, None
-            # face: (C, H, W) tensor из MTCNN
-            face_tensor = face.permute(1, 2, 0).byte().cpu().numpy()
+            # face: (C, H, W) float32 [0,255] tensor из MTCNN (post_process=False)
+            face_tensor = face.permute(1, 2, 0).clamp(0, 255).byte().cpu().numpy()
             face_pil = Image.fromarray(face_tensor)
             tensor = TRANSFORM(face_pil)
         else:
@@ -205,7 +210,7 @@ def run(cfg, video_ckpt, audio_ckpt, fusion_ckpt, camera_idx=0):
         )
         stream.start()
 
-    cap = cv2.VideoCapture(args.camera if hasattr(args, 'camera') else 0)
+    cap = cv2.VideoCapture(camera_idx)
     if not cap.isOpened():
         print(f"[ERROR] Camera not found. Trying indices 0-3...")
         for idx in range(4):

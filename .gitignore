@@ -22,6 +22,7 @@ venv/
 # Jupyter
 .ipynb_checkpoints/
 *.ipynb
+notebooks/
 
 # IDE
 .vscode/
@@ -30,10 +31,22 @@ venv/
 # Claude Code
 .claude/
 
-# Личные документы диплома
+# Личные документы и презентации диплома
 отчет/
 Бланк задания_090301.docx
 Задача.txt
+ПЛАН.md
+ИСТОЧНИКИ.md
+*.pptx
+*.docx
+
+# Вспомогательные скрипты (не часть системы)
+add_new_slides.py
+read_pptx.py
+update_pptx.py
+check_labels.py
+run_fusion.py
+run_train_fusion.py
 
 # OS
 .DS_Store

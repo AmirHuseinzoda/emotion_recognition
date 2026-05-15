@@ -73,7 +73,7 @@ def extract_face_sequence(video_path: str, face_size: int, max_frames: int = 300
 
         for face_tensor in results:
             if face_tensor is not None:
-                face_np = face_tensor.permute(1, 2, 0).byte().cpu().numpy()
+                face_np = face_tensor.permute(1, 2, 0).clamp(0, 255).byte().cpu().numpy()
                 if face_np.shape[:2] != (face_size, face_size):
                     face_np = cv2.resize(face_np, (face_size, face_size))
                 faces.append(face_np)

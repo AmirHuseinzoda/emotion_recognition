@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from models.video.backbone import VideoEmotionModel
 from models.audio.transformer import AudioEmotionModel
 from models.fusion.fusion import FusionModel
-from datasets.ravdess import IDX_TO_LABEL
+from datasets.ravdess import IDX_TO_LABEL_6 as IDX_TO_LABEL
 
 try:
     from facenet_pytorch import MTCNN
@@ -58,7 +58,8 @@ TRANSFORM = transforms.Compose([
     transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
 ])
 
-detector = MTCNN(keep_all=False, device=str(DEVICE)) if MTCNN_AVAILABLE else None
+detector = MTCNN(image_size=112, margin=20, keep_all=False,
+                 post_process=False, device=str(DEVICE)) if MTCNN_AVAILABLE else None
 
 video_model = VideoEmotionModel(
     num_classes=NUM_CLASSES,
@@ -87,6 +88,9 @@ fusion_model = FusionModel(
     audio_model=audio_model,
     fusion_type=CFG['fusion']['method'],
     num_classes=NUM_CLASSES,
+    video_embed_dim=TCN_CFG['num_channels'],
+    audio_embed_dim=CFG['audio']['hidden_size'],
+    hidden_dim=CFG['fusion']['hidden_dim'],
 )
 fusion_model.load_state_dict(
     torch.load(CFG['paths']['fusion_model_ckpt'], map_location='cpu')
@@ -111,7 +115,7 @@ def extract_face_frames(video_path: str) -> Optional[torch.Tensor]:
             face = detector(pil)
             if face is None:
                 continue
-            face_np = face.permute(1, 2, 0).byte().cpu().numpy()
+            face_np = face.permute(1, 2, 0).clamp(0, 255).byte().cpu().numpy()
             face_pil = Image.fromarray(face_np)
         else:
             face_pil = pil

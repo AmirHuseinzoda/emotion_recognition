@@ -13,11 +13,11 @@ import torch
 import torch.nn as nn
 import pandas as pd
 from torch.utils.data import DataLoader
-from sklearn.metrics import f1_score, accuracy_score, classification_report
+from sklearn.metrics import f1_score, accuracy_score, recall_score, classification_report
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from datasets.ravdess import RAVDESSVideoDataset, IDX_TO_LABEL
+from datasets.ravdess import RAVDESSVideoDataset, IDX_TO_LABEL_6 as IDX_TO_LABEL
 from models.video.backbone import VideoEmotionModel
 
 import yaml
@@ -56,8 +56,8 @@ def main():
     wf         = cfg['video']['window_frames']
 
     test_df = pd.read_csv(splits_dir / 'test.csv')
-    test_df = test_df[test_df['ext'].isin(['.mp4', '.flv'])].reset_index(drop=True)
-    print(f"Test samples: {len(test_df)}")
+    test_df = test_df[test_df['ext'] == '.flv'].reset_index(drop=True)
+    print(f"Test samples (CREMA-D): {len(test_df)}")
 
     test_ds = RAVDESSVideoDataset(test_df, proc_dir, wf, augment=False)
     test_loader = DataLoader(test_ds, batch_size=cfg['video']['train']['batch_size'],
@@ -80,13 +80,16 @@ def main():
 
     labels, preds = evaluate(model, test_loader, device)
 
+    num_classes = cfg['emotions']['num_classes']
     acc = accuracy_score(labels, preds)
     f1  = f1_score(labels, preds, average='macro', zero_division=0)
+    uar = recall_score(labels, preds, average='macro', zero_division=0)
 
     print(f"Test Accuracy : {acc:.4f}")
-    print(f"Test Macro F1 : {f1:.4f}\n")
+    print(f"Test Macro F1 : {f1:.4f}")
+    print(f"Test UAR      : {uar:.4f}\n")
 
-    label_names = [IDX_TO_LABEL[i] for i in range(cfg['emotions']['num_classes'])]
+    label_names = [IDX_TO_LABEL[i] for i in range(num_classes)]
     print(classification_report(labels, preds, target_names=label_names, zero_division=0))
 
 

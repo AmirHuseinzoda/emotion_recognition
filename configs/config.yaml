@@ -1,9 +1,9 @@
 data:
   raw_dir: "data/raw/RAVDESS"
+  cremad_dir: "data/raw/CREMA_D"
+  cremad_audio_dir: "data/raw/CREMA_D_audio"
   processed_dir: "data/processed"
   splits_dir: "data/splits"
-  val_split: 0.15
-  test_split: 0.15
   seed: 42
 
 emotions:
@@ -17,7 +17,7 @@ emotions:
 
 video:
   fps: 30
-  window_frames: 24
+  window_frames: 32          # увеличено с 24 — больше контекста для Bi-LSTM
   face_size: 112
   stride: 12
   backbone: "efficientnet_b0"
@@ -25,11 +25,11 @@ video:
   backbone_frozen_epochs: 5
   embed_dim: 1280
 
-  tcn:
+  tcn:                       # параметры сохранены для совместимости API (Bi-LSTM их игнорирует)
     num_levels: 5
     num_channels: 256
     kernel_size: 3
-    dropout: 0.2
+    dropout: 0.4
 
   train:
     epochs: 50
@@ -38,32 +38,49 @@ video:
     weight_decay: 0.0001
     scheduler: "cosine"
     warmup_epochs: 3
+    focal_gamma: 2.0
+    label_smoothing: 0.1
+    mixup_alpha: 0.4
+    weighted_sampler: true
+    early_stopping_patience: 8
 
 audio:
   sample_rate: 16000
   max_duration_sec: 5.0
-  model_name: "facebook/hubert-base-ls960"
-  hidden_size: 768
+  model_name: "microsoft/wavlm-large"   # WavLM-Large: +5-8% SER vs HuBERT-base
+  hidden_size: 1024                      # hidden_size WavLM-Large (768 у HuBERT-base)
   dropout: 0.3
 
   train:
     epochs: 30
-    batch_size: 16
+    batch_size: 8                         # уменьшен для WavLM-Large (300M params)
     lr: 0.00005
     weight_decay: 0.0001
     scheduler: "cosine"
     warmup_epochs: 2
     freeze_feature_encoder: true
+    focal_gamma: 2.0
+    label_smoothing: 0.1
+    mixup_alpha: 0.4
+    weighted_sampler: true
+    early_stopping_patience: 8
 
 fusion:
-  method: "weighted"
+  method: "attention"
   alpha: 0.5
   hidden_dim: 256
 
   train:
-    epochs: 20
+    epochs: 20                             # Фаза 1: только fusion-слой
     batch_size: 16
     lr: 0.0001
+    focal_gamma: 2.0
+    label_smoothing: 0.1
+    early_stopping_patience: 6
+    joint_finetune: true                   # Фаза 2: совместное обучение
+    joint_finetune_epochs: 10
+    joint_finetune_lr: 0.000005            # малый LR для базовых моделей
+    aux_loss_weight: 0.3                   # вес auxiliary loss (видео + аудио)
 
 paths:
   video_model_ckpt: "checkpoints/video_best.pt"

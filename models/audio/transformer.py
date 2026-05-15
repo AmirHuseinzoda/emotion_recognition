@@ -1,58 +1,96 @@
 """
-Аудио-модель: HuBERT base (или wav2vec 2.0) + классификационная голова.
+Аудио-модель: WavLM-Large (или HuBERT) + классификационная голова.
 
 Pipeline:
-  raw waveform (T,) → HuBERT → (T', 768) → mean pool → (768,)
-                   → MLP head → (num_classes,)
+  raw waveform (T,) → WavLM encoder → (T', H) → AttentiveMeanPool → (H,)
+                    → LayerNorm → Linear(H, 256) → GELU → Linear(256, C)
 
-Стратегия fine-tuning:
-  1. Заморозить feature_extractor (CNN-часть HuBERT) — всегда.
-  2. На первых эпохах обучать только head.
-  3. После unfreeze() разморозить трансформерные слои.
+Улучшения vs HuBERT-base:
+  - WavLM-Large (H=1024, 24 layers) → +5-8% SER по литературе
+  - AttentiveMeanPool: обучаемые веса внимания вместо простого среднего
+  - GELU + LayerNorm в голове для устойчивости обучения
+  - AutoModel: совместим с любым wav2vec/HuBERT/WavLM чекпоинтом
+
+ВАЖНО: checkpoint HuBERT (state_dict с ключами hubert.*) несовместим
+       с этой версией (ключи model.*). Требует переобучения.
 """
 
 import torch
 import torch.nn as nn
-from transformers import HubertModel, AutoFeatureExtractor
+import torch.nn.functional as F
+from transformers import AutoModel, AutoFeatureExtractor
+
+
+class AttentiveMeanPool(nn.Module):
+    """
+    Обучаемое взвешенное усреднение по временной оси.
+    Фокусируется на наиболее эмоционально насыщенных фреймах.
+    """
+
+    def __init__(self, hidden_size: int):
+        super().__init__()
+        self.attn = nn.Linear(hidden_size, 1)
+
+    def forward(self, x: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
+        """
+        Args:
+            x:    (B, T, H) — последовательность скрытых состояний
+            mask: (B, T)    — маска паддинга (1=реальный токен, 0=паддинг)
+        Returns:
+            pooled: (B, H)
+        """
+        w = self.attn(x).squeeze(-1)                    # (B, T)
+        if mask is not None:
+            w = w.masked_fill(mask == 0, float('-inf'))
+        w = F.softmax(w, dim=-1).unsqueeze(-1)          # (B, T, 1)
+        return (x * w).sum(dim=1)                       # (B, H)
 
 
 class AudioEmotionModel(nn.Module):
     """
-    HuBERT-base с классификационной головой для распознавания эмоций.
+    WavLM-Large (или любой AutoModel) + AttentiveMeanPool + MLP-голова.
 
     Args:
         num_classes:            количество классов
-        model_name:             HuggingFace checkpoint
+        model_name:             HuggingFace checkpoint (WavLM, HuBERT, wav2vec2)
         dropout:                dropout в MLP-голове
-        freeze_feature_encoder: заморозить CNN-часть HuBERT (рекомендуется)
-        freeze_transformer:     заморозить трансформерные слои (для разогрева)
+        freeze_feature_encoder: заморозить CNN-часть (рекомендуется)
+        freeze_transformer:     заморозить трансформерные слои (для разогрева головы)
     """
 
     def __init__(
         self,
         num_classes: int = 8,
-        model_name: str = "facebook/hubert-base-ls960",
+        model_name: str = "microsoft/wavlm-large",
         dropout: float = 0.3,
         freeze_feature_encoder: bool = True,
         freeze_transformer: bool = False,
     ):
         super().__init__()
-        self.hubert = HubertModel.from_pretrained(model_name)
-        self.hidden_size = self.hubert.config.hidden_size  # 768
+        self.model = AutoModel.from_pretrained(model_name)
+        self.hidden_size = self.model.config.hidden_size  # 1024 for WavLM-Large
 
         if freeze_feature_encoder:
-            self.hubert.feature_extractor._freeze_parameters()
+            self.model.feature_extractor._freeze_parameters()
 
         if freeze_transformer:
-            for p in self.hubert.encoder.parameters():
+            for p in self.model.encoder.parameters():
                 p.requires_grad = False
 
+        self.pool = AttentiveMeanPool(self.hidden_size)
+
         self.classifier = nn.Sequential(
+            nn.LayerNorm(self.hidden_size),
             nn.Linear(self.hidden_size, 256),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(256, num_classes),
         )
+
+    def embed(self, waveform: torch.Tensor, attention_mask: torch.Tensor = None) -> torch.Tensor:
+        """(B, T) -> (B, hidden_size) — пул-эмбеддинг перед классификатором."""
+        outputs = self.model(input_values=waveform, attention_mask=attention_mask)
+        return self.pool(outputs.last_hidden_state, attention_mask)
 
     def forward(self, waveform: torch.Tensor, attention_mask: torch.Tensor = None) -> torch.Tensor:
         """
@@ -62,27 +100,13 @@ class AudioEmotionModel(nn.Module):
         Returns:
             logits: (B, num_classes)
         """
-        outputs = self.hubert(
-            input_values=waveform,
-            attention_mask=attention_mask,
-        )
-        # (B, T', hidden_size) → mean pool → (B, hidden_size)
-        hidden = outputs.last_hidden_state
-        if attention_mask is not None:
-            # Маскированное среднее
-            mask = attention_mask.unsqueeze(-1).float()
-            pooled = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
-        else:
-            pooled = hidden.mean(dim=1)
-
-        return self.classifier(pooled)
+        return self.classifier(self.embed(waveform, attention_mask))
 
     def unfreeze_transformer(self):
         """Размораживает трансформерные слои для полного fine-tuning."""
-        for p in self.hubert.encoder.parameters():
+        for p in self.model.encoder.parameters():
             p.requires_grad = True
 
 
-def get_feature_extractor(model_name: str = "facebook/hubert-base-ls960"):
-    """Возвращает HuggingFace feature extractor для нормализации waveform."""
+def get_feature_extractor(model_name: str = "microsoft/wavlm-large"):
     return AutoFeatureExtractor.from_pretrained(model_name)
