@@ -1,11 +1,9 @@
 """
-Обучение fusion-модуля поверх видео и аудио моделей.
+Обучение fusion-модуля (Multi-Layer Cross-Modal Attention) поверх видео и аудио моделей.
 
-Стратегия двухфазного обучения:
-  Фаза 1: базовые модели заморожены, обучается только fusion-слой.
-  Фаза 2 (joint fine-tuning): размораживаем всё, дифференциальный LR.
-            fusion:       lr  (1e-4)
-            base models:  joint_finetune_lr (5e-6)
+Стратегия:
+  Фаза 1: базовые модели заморожены, обучается только fusion (20 эпох, lr=1e-4).
+  Фаза 2 (joint fine-tuning, опционально): размораживаем всё, дифференциальный LR.
           + auxiliary loss из видео и аудио ветвей (предотвращает забывание).
 
 Запуск:
@@ -235,6 +233,7 @@ def main():
         num_levels=tcn_cfg['num_levels'],
         kernel_size=tcn_cfg['kernel_size'],
         dropout=tcn_cfg['dropout'],
+        temporal_type=cfg['video'].get('temporal_type', 'transformer'),
     )
     video_model.load_state_dict(torch.load(cfg['paths']['video_model_ckpt'], map_location='cpu'))
 
@@ -242,6 +241,7 @@ def main():
         num_classes=cfg['emotions']['num_classes'],
         model_name=cfg['audio']['model_name'],
         dropout=cfg['audio']['dropout'],
+        layer_aggregation=cfg['audio'].get('layer_aggregation', True),
     )
     audio_model.load_state_dict(torch.load(cfg['paths']['audio_model_ckpt'], map_location='cpu'))
 

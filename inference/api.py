@@ -67,6 +67,7 @@ video_model = VideoEmotionModel(
     num_levels=TCN_CFG['num_levels'],
     kernel_size=TCN_CFG['kernel_size'],
     dropout=0.0,
+    temporal_type=CFG['video'].get('temporal_type', 'transformer'),
 )
 video_model.load_state_dict(
     torch.load(CFG['paths']['video_model_ckpt'], map_location='cpu')
@@ -77,6 +78,7 @@ audio_model = AudioEmotionModel(
     num_classes=NUM_CLASSES,
     model_name=CFG['audio']['model_name'],
     dropout=0.0,
+    layer_aggregation=CFG['audio'].get('layer_aggregation', True),
 )
 audio_model.load_state_dict(
     torch.load(CFG['paths']['audio_model_ckpt'], map_location='cpu')

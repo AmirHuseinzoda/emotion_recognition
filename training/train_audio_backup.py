@@ -1,11 +1,18 @@
 """
-Обучение аудио-модели (WavLM-Large + Weighted Layer Aggregation + MLP head).
+Обучение аудио-модели (WavLM-Large + AttentiveMeanPool + MLP head).
 
 Стратегия:
-  Фаза 1: трансформерные слои заморожены, обучаем голову + layer weights.
+  Фаза 1: трансформерные слои заморожены, обучаем только голову.
   Фаза 2: размораживаем трансформер, full fine-tuning с малым lr.
 
 Данные: CREMA-D .wav + RAVDESS .wav (оба источника, actor-independent split).
+
+Улучшения vs предыдущей версии:
+  - WavLM-Large (microsoft/wavlm-large) вместо HuBERT-base
+  - AttentiveMeanPool вместо простого среднего
+  - Включён RAVDESS аудио (+~18% данных, больше разнообразия спикеров)
+  - Mixup augmentation (50% вероятность применения к батчу)
+  - AMP (torch.cuda.amp) — экономит память для больших моделей
 
 Запуск:
   python training/train_audio.py --config configs/config.yaml
@@ -183,24 +190,18 @@ def main():
     train_cfg   = audio_cfg['train']
     num_classes = cfg['emotions']['num_classes']
 
-    layer_agg = audio_cfg.get('layer_aggregation', True)
     model = AudioEmotionModel(
         num_classes=num_classes,
         model_name=audio_cfg['model_name'],
         dropout=audio_cfg['dropout'],
         freeze_feature_encoder=train_cfg['freeze_feature_encoder'],
         freeze_transformer=True,   # Фаза 1: только голова
-        layer_aggregation=layer_agg,
     ).to(device)
-    print(f'  Layer aggregation: {layer_agg}')
 
-    # neutral=0, happy=1, sad=2, angry=3, fearful=4, disgust=5
-    class_weight = torch.tensor([1.0, 0.8, 0.9, 0.9, 1.3, 1.3], device=device)
     criterion = FocalLoss(
         gamma=train_cfg.get('focal_gamma', 2.0),
         label_smoothing=train_cfg.get('label_smoothing', 0.1),
         num_classes=num_classes,
-        class_weight=class_weight,
     )
 
     mixup     = Mixup(alpha=train_cfg.get('mixup_alpha', 0.4))

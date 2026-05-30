@@ -3,12 +3,12 @@
 
 Реализованы два варианта:
   1. WeightedFusion               — взвешенное среднее вероятностей (baseline)
-  2. CrossModalAttentionFusion    — multi-layer cross-modal attention (основной)
+  2. CrossModalAttentionFusion    — cross-modal attention + FFN (основной)
 
-CrossModalAttentionFusion:
-  - 2 слоя cross-attention (v←a и a←v, 8 голов каждый)
-  - FFN (×4 expansion) с GELU после каждого слоя cross-attention
-  - Modality dropout (p=0.15) — случайное обнуление модальности при обучении
+Улучшения CrossModalAttentionFusion vs предыдущей версии:
+  - 8 голов вместо 4 (выше ёмкость при hidden_dim=256)
+  - Post-attention FFN (×4 expansion) — как в стандартном Transformer блоке
+  - GELU вместо ReLU в классификаторе
   - Единый проход через backbone (embed() вместо двух вызовов)
   - Поддержка joint fine-tuning базовых моделей
 """
@@ -40,47 +40,16 @@ class WeightedFusion(nn.Module):
         return torch.log(fused + 1e-8)
 
 
-class CrossModalAttentionLayer(nn.Module):
-    """Один слой cross-modal attention: v←a, a←v, FFN."""
-
-    def __init__(self, hidden_dim: int, num_heads: int = 8, dropout: float = 0.2):
-        super().__init__()
-        self.attn_v2a = nn.MultiheadAttention(
-            embed_dim=hidden_dim, num_heads=num_heads,
-            dropout=dropout, batch_first=True,
-        )
-        self.attn_a2v = nn.MultiheadAttention(
-            embed_dim=hidden_dim, num_heads=num_heads,
-            dropout=dropout, batch_first=True,
-        )
-        self.norm_v1 = nn.LayerNorm(hidden_dim)
-        self.norm_a1 = nn.LayerNorm(hidden_dim)
-
-        self.ffn_v = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim * 4), nn.GELU(),
-            nn.Dropout(dropout), nn.Linear(hidden_dim * 4, hidden_dim),
-        )
-        self.ffn_a = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim * 4), nn.GELU(),
-            nn.Dropout(dropout), nn.Linear(hidden_dim * 4, hidden_dim),
-        )
-        self.norm_v2 = nn.LayerNorm(hidden_dim)
-        self.norm_a2 = nn.LayerNorm(hidden_dim)
-
-    def forward(self, v: torch.Tensor, a: torch.Tensor):
-        v_att, _ = self.attn_v2a(query=v, key=a, value=a)
-        v = self.norm_v1(v + v_att)
-        a_att, _ = self.attn_a2v(query=a, key=v, value=v)
-        a = self.norm_a1(a + a_att)
-        v = self.norm_v2(v + self.ffn_v(v))
-        a = self.norm_a2(a + self.ffn_a(a))
-        return v, a
-
-
 class CrossModalAttentionFusion(nn.Module):
     """
-    Multi-layer cross-modal attention fusion.
-    v2: 2 слоя cross-attention (было 1) + modality dropout.
+    Cross-modal attention fusion с полноценным Transformer-блоком.
+
+    Каждая модальность обращается к другой через cross-attention,
+    затем FFN дополнительно преобразует результат.
+    Конкатенация → классификатор.
+
+    Источник: Tsai et al. "Multimodal Transformer for Unaligned
+    Multimodal Language Sequences" (ACL 2019) + стандартный FFN блок.
     """
 
     def __init__(
@@ -90,19 +59,43 @@ class CrossModalAttentionFusion(nn.Module):
         num_classes: int = 8,
         hidden_dim: int = 256,
         num_heads: int = 8,
-        num_layers: int = 2,
         dropout: float = 0.2,
-        modality_dropout: float = 0.15,
     ):
         super().__init__()
+        # Проекция в общее пространство
         self.proj_v = nn.Linear(video_dim, hidden_dim)
         self.proj_a = nn.Linear(audio_dim, hidden_dim)
-        self.modality_dropout = modality_dropout
 
-        self.layers = nn.ModuleList([
-            CrossModalAttentionLayer(hidden_dim, num_heads, dropout)
-            for _ in range(num_layers)
-        ])
+        # Cross-attention: v ← a и a ← v
+        self.attn_v2a = nn.MultiheadAttention(
+            embed_dim=hidden_dim, num_heads=num_heads,
+            dropout=dropout, batch_first=True,
+        )
+        self.attn_a2v = nn.MultiheadAttention(
+            embed_dim=hidden_dim, num_heads=num_heads,
+            dropout=dropout, batch_first=True,
+        )
+
+        self.norm_v1 = nn.LayerNorm(hidden_dim)
+        self.norm_a1 = nn.LayerNorm(hidden_dim)
+
+        # FFN для видео-ветки (после cross-attention)
+        self.ffn_v = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim * 4),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim * 4, hidden_dim),
+        )
+        # FFN для аудио-ветки
+        self.ffn_a = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim * 4),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim * 4, hidden_dim),
+        )
+
+        self.norm_v2 = nn.LayerNorm(hidden_dim)
+        self.norm_a2 = nn.LayerNorm(hidden_dim)
 
         self.classifier = nn.Sequential(
             nn.Linear(hidden_dim * 2, hidden_dim),
@@ -112,21 +105,27 @@ class CrossModalAttentionFusion(nn.Module):
         )
 
     def forward(self, embed_video: torch.Tensor, embed_audio: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            embed_video: (B, video_dim)
+            embed_audio: (B, audio_dim)
+        Returns:
+            logits: (B, num_classes)
+        """
         v = self.proj_v(embed_video).unsqueeze(1)   # (B, 1, H)
         a = self.proj_a(embed_audio).unsqueeze(1)   # (B, 1, H)
 
-        if self.training and self.modality_dropout > 0:
-            r = torch.rand(1).item()
-            if r < self.modality_dropout:
-                v = torch.zeros_like(v)
-            elif r < self.modality_dropout * 2:
-                a = torch.zeros_like(a)
+        # Cross-attention + residual
+        v_att, _ = self.attn_v2a(query=v, key=a, value=a)
+        v = self.norm_v1(v + v_att)                 # (B, 1, H)
 
-        for layer in self.layers:
-            v, a = layer(v, a)
+        a_att, _ = self.attn_a2v(query=a, key=v, value=v)
+        a = self.norm_a1(a + a_att)                 # (B, 1, H)
 
-        v = v.squeeze(1)
-        a = a.squeeze(1)
+        # FFN + residual
+        v = self.norm_v2(v + self.ffn_v(v)).squeeze(1)   # (B, H)
+        a = self.norm_a2(a + self.ffn_a(a)).squeeze(1)   # (B, H)
+
         return self.classifier(torch.cat([v, a], dim=-1))
 
 

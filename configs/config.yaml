@@ -17,7 +17,7 @@ emotions:
 
 video:
   fps: 30
-  window_frames: 32          # увеличено с 24 — больше контекста для Bi-LSTM
+  window_frames: 32
   face_size: 112
   stride: 12
   backbone: "efficientnet_b0"
@@ -25,7 +25,7 @@ video:
   backbone_frozen_epochs: 5
   embed_dim: 1280
 
-  tcn:                       # параметры сохранены для совместимости API (Bi-LSTM их игнорирует)
+  tcn:
     num_levels: 5
     num_channels: 256
     kernel_size: 3
@@ -47,8 +47,8 @@ video:
 audio:
   sample_rate: 16000
   max_duration_sec: 5.0
-  model_name: "microsoft/wavlm-large"   # WavLM-Large: +5-8% SER vs HuBERT-base
-  hidden_size: 1024                      # hidden_size WavLM-Large (768 у HuBERT-base)
+  model_name: "microsoft/wavlm-large"
+  hidden_size: 1024
   dropout: 0.3
 
   train:

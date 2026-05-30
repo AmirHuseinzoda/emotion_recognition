@@ -72,6 +72,7 @@ def main():
         dropout=tcn_cfg['dropout'],
         pretrained=False,
         frozen_backbone=False,
+        temporal_type=cfg['video'].get('temporal_type', 'transformer'),
     ).to(device)
 
     ckpt_path = cfg['paths']['video_model_ckpt']

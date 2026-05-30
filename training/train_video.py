@@ -1,15 +1,11 @@
 """
-Обучение видео-модели (EfficientNet-B0 + Bi-LSTM с attention pooling).
+Обучение видео-модели (EfficientNet-B0 + Temporal Transformer).
 
 Стратегия двухфазного обучения:
-  Фаза 1 (frozen_epochs): backbone заморожен, обучаем только LSTM + classifier.
+  Фаза 1 (frozen_epochs): backbone заморожен, обучаем Transformer + classifier.
   Фаза 2: разморозка backbone, обучение end-to-end с меньшим lr.
 
-Данные: только CREMA-D .flv (91 актёр, actor-independent split).
-
-Улучшения vs предыдущей версии:
-  - Mixup augmentation (50% вероятность применения к батчу)
-  - AMP (torch.cuda.amp) для экономии памяти при window_frames=32
+Данные: CREMA-D .flv (91 актёр) + RAVDESS .mp4 (24 актёра), actor-independent split.
 
 Запуск:
   python training/train_video.py --config configs/config.yaml
@@ -53,31 +49,14 @@ def build_loaders(cfg: dict):
     train_df = pd.read_csv(splits_dir / 'train.csv')
     val_df   = pd.read_csv(splits_dir / 'val.csv')
 
-    # Только CREMA-D: 91 актёр, чистое студийное качество, нет domain shift
-    train_df = train_df[train_df['ext'] == '.flv'].reset_index(drop=True)
-    val_df   = val_df[val_df['ext'] == '.flv'].reset_index(drop=True)
+    # CREMA-D (.flv) + RAVDESS (.mp4) — оба источника видео
+    train_df = train_df[train_df['ext'].isin(['.flv', '.mp4'])].reset_index(drop=True)
+    val_df   = val_df[val_df['ext'].isin(['.flv', '.mp4'])].reset_index(drop=True)
 
-    # Обрезаем классы с переобучением (sad, angry, fearful имеют низкий val recall
-    # при высоком train recall => модель запоминает актёро-специфичные паттерны).
-    # happy и disgust оставляем полностью — они обобщаются хорошо.
-    # Cap = количество neutral (наименьший класс) чтобы не терять много данных.
-    seed = cfg['data']['seed']
-    counts = train_df['label'].value_counts()
-    neutral_count = int(counts.get(0, counts.min()))  # label 0 = neutral
-    overfit_labels = [2, 3, 4]  # sad, angry, fearful
-    label_names = ['neutral', 'happy', 'sad', 'angry', 'fearful', 'disgust']
-    parts = []
-    for label in range(num_classes):
-        subset = train_df[train_df['label'] == label]
-        if label in overfit_labels and len(subset) > neutral_count:
-            subset = subset.sample(neutral_count, random_state=seed)
-            print(f'  Capped {label_names[label]} ({label}): {counts[label]} -> {neutral_count}')
-        parts.append(subset)
-    train_df = pd.concat(parts).sample(frac=1, random_state=seed).reset_index(drop=True)
-
-    # Статистика
-    print(f'  [train] {len(train_df)} samples after cap | class dist: {train_df["label"].value_counts().sort_index().to_dict()}')
-    print(f'  [val]   {len(val_df)} samples')
+    print(f'  [train] {len(train_df)} video samples | class dist: {train_df["label"].value_counts().sort_index().to_dict()}')
+    if 'source' in train_df.columns:
+        print(f'          sources: {train_df["source"].value_counts().to_dict()}')
+    print(f'  [val]   {len(val_df)} video samples')
 
     train_ds = RAVDESSVideoDataset(train_df, proc_dir, wf, augment=True)
     val_ds   = RAVDESSVideoDataset(val_df,   proc_dir, wf, augment=False)
@@ -194,6 +173,7 @@ def main():
     train_cfg   = cfg['video']['train']
     num_classes = cfg['emotions']['num_classes']
 
+    temporal_type = cfg['video'].get('temporal_type', 'transformer')
     model = VideoEmotionModel(
         num_classes=num_classes,
         num_channels=tcn_cfg['num_channels'],
@@ -202,13 +182,12 @@ def main():
         dropout=tcn_cfg['dropout'],
         pretrained=cfg['video']['backbone_pretrained'],
         frozen_backbone=True,
+        temporal_type=temporal_type,
     ).to(device)
+    print(f'  Temporal: {temporal_type}')
 
     # neutral=0, happy=1, sad=2, angry=3, fearful=4, disgust=5
-    # Данные sad/angry/fearful уже обрезаны выше — используем умеренные веса.
-    # angry дополнительно буcтим весом (низкий recall + данные обрезаны).
-    # happy/disgust полные данные → слегка снижаем вес.
-    class_weight = torch.tensor([1.2, 0.8, 1.1, 1.4, 1.1, 0.8], device=device)
+    class_weight = torch.tensor([1.0, 0.7, 1.6, 1.3, 1.6, 0.7], device=device)
     criterion = FocalLoss(
         gamma=train_cfg.get('focal_gamma', 2.0),
         label_smoothing=train_cfg.get('label_smoothing', 0.1),

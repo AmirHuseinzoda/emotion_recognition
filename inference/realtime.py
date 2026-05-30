@@ -80,6 +80,7 @@ class EmotionInference:
             num_levels=tcn_cfg['num_levels'],
             kernel_size=tcn_cfg['kernel_size'],
             dropout=0.0,
+            temporal_type=cfg['video'].get('temporal_type', 'transformer'),
         )
         self.video_model.load_state_dict(torch.load(video_ckpt, map_location='cpu'))
         self.video_model.eval().to(DEVICE)
@@ -89,6 +90,7 @@ class EmotionInference:
             num_classes=self.num_classes,
             model_name=cfg['audio']['model_name'],
             dropout=0.0,
+            layer_aggregation=cfg['audio'].get('layer_aggregation', True),
         )
         self.audio_model.load_state_dict(torch.load(audio_ckpt, map_location='cpu'))
         self.audio_model.eval().to(DEVICE)
